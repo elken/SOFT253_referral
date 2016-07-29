@@ -65,6 +65,9 @@
 #include "x_nucleo_iks01a1.h"
 #include "cmsis_os.h"
 #include <string>
+#include "Buffer.h"
+
+#define MAX_ITEMS 128
 
 /* Instantiate the expansion board */
 static X_NUCLEO_IKS01A1 *mems_expansion_board = X_NUCLEO_IKS01A1::Instance(D14, D15);
@@ -76,21 +79,17 @@ static MagneticSensor *magnetometer = mems_expansion_board->magnetometer;
 
 // extern char *printDouble(char* str, double v, int decimalDigits=2);
 
-typedef enum {
-  ACCEL,
-  MAG,
-  GYRO
-} DataType;
-
 typedef struct  {
   int32_t x;
   int32_t y;
   int32_t z;
-  DataType type;
+  char* type;
 } Data;
 
 Ticker ticker;
 Mail<Data, 128> dataMailBox;
+Buffer<Data, MAX_ITEMS>* dataBuffer = new Buffer<Data, MAX_ITEMS>();
+osThreadId sampleId = 0;
 
 void initSensors() {
   uint8_t id;
@@ -107,23 +106,27 @@ void initSensors() {
 }
 
 void sampleData(const void*) {
-  while (true) {
+  sampleId = Thread::gettid();
+  printf("Running on %p\r\n", sampleId);
+  // while (1) {
     int32_t axes[3];
 
     accelerometer->Get_X_Axes(axes);
-    Data accelData = {axes[0], axes[1], axes[2], ACCEL};
+    Data accelData = {axes[0], axes[1], axes[2], "Accelerometer"};
     dataMailBox.put(&accelData);
 
     magnetometer->Get_M_Axes(axes);
-    Data magData = {axes[0], axes[1], axes[2], MAG};
+    Data magData = {axes[0], axes[1], axes[2], "Magnetometer"};
     dataMailBox.put(&magData);
 
     gyroscope->Get_G_Axes(axes);
-    Data gyroData = {axes[0], axes[1], axes[2], GYRO};
+    Data gyroData = {axes[0], axes[1], axes[2], "Gyroscope"};
     dataMailBox.put(&gyroData);
-
-    Thread::wait(1500);
-  }
+    dataBuffer->push(gyroData);
+    dataBuffer->push(magData);
+    dataBuffer->push(accelData);
+  //   Thread::wait(100);
+  // }
 }
 
 /* Simple main function */
@@ -135,26 +138,8 @@ int main() {
     osEvent event = dataMailBox.get();
     if (event.status == osEventMail) {
       Data* mailData = (Data*) event.value.p;
-      std::string name = "not found";
-      
-      switch(mailData->type) {
-      case (ACCEL):
-        name = "Accelerometer";
-        break;
 
-      case (GYRO):
-        name = "Gyroscope";
-        break;
-
-      case (MAG):
-        name = "Magnetometer";
-        break;
-
-      default:
-        break;
-      }
-
-      printf("%s \tx: %6ld \ty: %6ld \tz: %6ld\r\n", name.c_str(), mailData->x, mailData->y, mailData->z);
+      printf("%s \tx: %6ld \ty: %6ld \tz: %6ld\r\n", mailData->type, mailData->x, mailData->y, mailData->z);
       dataMailBox.free(mailData);
     }
   }
