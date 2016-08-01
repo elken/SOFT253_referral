@@ -64,32 +64,25 @@
 #include "rtos.h"
 #include "x_nucleo_iks01a1.h"
 #include "cmsis_os.h"
-#include <string>
-#include "Buffer.h"
 
-#define MAX_ITEMS 128
+#define MAX_ITEMS 10
 
 /* Instantiate the expansion board */
 static X_NUCLEO_IKS01A1 *mems_expansion_board = X_NUCLEO_IKS01A1::Instance(D14, D15);
 
 /* Retrieve the composing elements of the expansion board */
-static GyroSensor *gyroscope = mems_expansion_board->GetGyroscope();
 static MotionSensor *accelerometer = mems_expansion_board->GetAccelerometer();
-static MagneticSensor *magnetometer = mems_expansion_board->magnetometer;
-
-// extern char *printDouble(char* str, double v, int decimalDigits=2);
 
 typedef struct  {
   int32_t x;
   int32_t y;
   int32_t z;
-  char* type;
 } Data;
 
 Ticker ticker;
-Mail<Data, 128> dataMailBox;
-Buffer<Data, MAX_ITEMS>* dataBuffer = new Buffer<Data, MAX_ITEMS>();
-osThreadId sampleId = 0;
+Mail<Data, MAX_ITEMS> dataMailBox;
+osThreadId mainThreadId;
+Data averages;
 
 void initSensors() {
   uint8_t id;
@@ -97,50 +90,50 @@ void initSensors() {
 
   accelerometer->ReadID(&id);
   printf("LSM6DS0 Accelerometer             = 0x%X\r\n", id);
-  magnetometer->ReadID(&id);
-  printf("LIS3MDL Magnetometer              = 0x%X\r\n", id);
-  gyroscope->ReadID(&id);
-  printf("LSM6DS0 Accelerometer & Gyroscope = 0x%X\r\n", id);
-
-  wait(3);
 }
 
-void sampleData(const void*) {
-  sampleId = Thread::gettid();
-  printf("Running on %p\r\n", sampleId);
-  // while (1) {
+void sampleData(void const*) {
+  while (true) {
     int32_t axes[3];
-
     accelerometer->Get_X_Axes(axes);
-    Data accelData = {axes[0], axes[1], axes[2], "Accelerometer"};
-    dataMailBox.put(&accelData);
+    Data* accelData = dataMailBox.alloc();
+    if (accelData == NULL) {
+      osSignalSet(mainThreadId, 0x1);
+      averages.x /= 10;
+      averages.y /= 10;
+      averages.z /= 10;
+    }
 
-    magnetometer->Get_M_Axes(axes);
-    Data magData = {axes[0], axes[1], axes[2], "Magnetometer"};
-    dataMailBox.put(&magData);
+    accelData->x = axes[0];
+    accelData->y = axes[1];
+    accelData->z = axes[2];
 
-    gyroscope->Get_G_Axes(axes);
-    Data gyroData = {axes[0], axes[1], axes[2], "Gyroscope"};
-    dataMailBox.put(&gyroData);
-    dataBuffer->push(gyroData);
-    dataBuffer->push(magData);
-    dataBuffer->push(accelData);
-  //   Thread::wait(100);
-  // }
+    averages.x += accelData->x;
+    averages.y += accelData->y;
+    averages.z += accelData->z;
+
+    osStatus status = dataMailBox.put(accelData);
+
+    if (status == osErrorResource) {
+      printf("Resource not available (%4Xh)", status);
+    }
+    Thread::wait(100);
+  }
 }
 
 /* Simple main function */
 int main() {
+  mainThreadId = osThreadGetId();
   initSensors();
-  Thread mainThread(sampleData);
+  Thread thread(sampleData);
 
   while(1) {
-    osEvent event = dataMailBox.get();
-    if (event.status == osEventMail) {
-      Data* mailData = (Data*) event.value.p;
-
-      printf("%s \tx: %6ld \ty: %6ld \tz: %6ld\r\n", mailData->type, mailData->x, mailData->y, mailData->z);
-      dataMailBox.free(mailData);
-    }
+    osSignalWait(0x1, osWaitForever);
+    printf("Averages: \tx: %ld\t y: %ld\t z: %ld\r\n", averages.x, averages.y, averages.z);
+    dataMailBox = Mail<Data, MAX_ITEMS>();
+    averages.x = 0;
+    averages.y = 0;
+    averages.z = 0;
+    sleep();
   }
 }
