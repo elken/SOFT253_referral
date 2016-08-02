@@ -66,7 +66,10 @@
 #include "cmsis_os.h"
 #include "data.hpp"
 
+#define DEBUG 0
+#define MAX_MESSAGES 16
 #define MAX_ITEMS 10
+#define CAPACITY (MAX_ITEMS + 1)
 
 /* Instantiate the expansion board */
 static X_NUCLEO_IKS01A1 *mems_expansion_board = X_NUCLEO_IKS01A1::Instance(D14, D15);
@@ -74,49 +77,115 @@ static X_NUCLEO_IKS01A1 *mems_expansion_board = X_NUCLEO_IKS01A1::Instance(D14, 
 /* Retrieve the composing elements of the expansion board */
 static MotionSensor *accelerometer = mems_expansion_board->GetAccelerometer();
 
+Serial pc(USBTX, USBRX);
+
+// Message struct for the message queue
+struct Message {
+  const char* message;
+};
+
 Ticker ticker;
 Mail<Data, MAX_ITEMS> dataMailBox;
-osThreadId mainThreadId;
-Data averages;
+Mail<Message, MAX_MESSAGES> messageBox;
+Data samples[CAPACITY];
+int32_t sampleCount = 0;
+Mutex* averageLock = new Mutex();
+Semaphore* logSemaphore = new Semaphore(MAX_MESSAGES);
 
-void initSensors() {
-  uint8_t id;
-  printf("\r\n--- Starting new run ---\r\n");
-
-  accelerometer->ReadID(&id);
-  printf("LSM6DS0 Accelerometer             = 0x%X\r\n", id);
+// Send a message to the message box
+void sendMessage(const char* msg) {
+  logSemaphore->wait();
+  Message* m = messageBox.calloc();
+  m->message = msg;
+  messageBox.put(m);
 }
 
+// Print all messages in the mailbox
+void printMessages(void const*) {
+  while (true) {
+    osEvent evt = messageBox.get(1000);
+    if (evt.status == osEventMail) {
+      Message* m = (Message*) evt.value.p;
+      pc.printf(m->message);
+      messageBox.free(m);
+    }
+    logSemaphore->release();
+  }
+}
+
+// Sample data every 100ms, send error to log thread where applicable
 void sampleData() {
     int32_t axes[3];
+    averageLock->lock();
+#if DEBUG
+    sendMessage("Sample data got lock\r\n");
+#endif
     accelerometer->Get_X_Axes(axes);
     Data* accelData = dataMailBox.alloc();
-    if (dataMailBox.alloc() == NULL) {
-      osSignalSet(mainThreadId, 0x1);
-      averages = averages / 10;
-    }
 
     accelData = new Data(axes[0], axes[1], axes[2]);
-    averages = averages + *accelData;
-
     osStatus status = dataMailBox.put(accelData);
+    averageLock->unlock();
+#if DEBUG
+    sendMessage("Sample data lost lock\r\n");
+#endif
 
     if (status == osErrorResource) {
-      printf("Resource not available (%4Xh)", status);
+#if DEBUG
+      char message[50];
+      sprintf(message, "Resource not available (%4Xh)\r\n", status);
+      sendMessage(message);
+#endif
     }
 }
 
 /* Simple main function */
 int main() {
-  mainThreadId = osThreadGetId();
-  initSensors();
+#if DEBUG
+  sendMessage("\r\n--- Starting new debug run---\r\n");
+#else
+  sendMessage("\r\n--- Starting new run---\r\n");
+#endif
+
+
+#if DEBUG
+  uint8_t id;
+  accelerometer->ReadID(&id);
+  char message[50];
+  sprintf(message, "LSM6DS0 Accelerometer             = 0x%X\r\n", id);
+  sendMessage(message);
+#endif
+
+  Thread logging(printMessages);
   ticker.attach(&sampleData, 0.1);
 
   while(1) {
-    osSignalWait(0x1, osWaitForever);
-    printf("Averages: \tx: %ld\t y: %ld\t z: %ld\r\n", averages.x(), averages.y(), averages.z());
-    dataMailBox = Mail<Data, MAX_ITEMS>();
-    averages = {0, 0, 0};
-    sleep();
+    osEvent evt = dataMailBox.get();
+    if (evt.status == osEventMail) {
+      Data* mailData = (Data*) evt.value.p;
+      samples[sampleCount] = *mailData;
+      sampleCount = (sampleCount + 1) % CAPACITY;
+      if (sampleCount == MAX_ITEMS) {
+        averageLock->lock();
+        Data averages;
+#if DEBUG
+        sendMessage("Main got lock\r\n");
+#endif
+        for (int i = 0; i < MAX_ITEMS; i++) {
+          averages = averages + samples[i];
+        }
+        averages = averages / 10;
+        char message[64];
+        sprintf(message, "Average: \tx: %ld\t y: %ld\t z: %ld\r\n", averages.x(), averages.y(), averages.z());
+        sendMessage(message);
+        averages = Data();
+        averageLock->unlock();
+#if DEBUG
+        sendMessage("Main lost lock\r\n");
+#endif
+      }
+      dataMailBox.free(mailData);
+      sleep();
+    }
   }
 }
