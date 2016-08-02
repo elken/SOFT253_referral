@@ -64,6 +64,7 @@
 #include "rtos.h"
 #include "x_nucleo_iks01a1.h"
 #include "cmsis_os.h"
+#include "data.hpp"
 
 #define MAX_ITEMS 10
 
@@ -72,12 +73,6 @@ static X_NUCLEO_IKS01A1 *mems_expansion_board = X_NUCLEO_IKS01A1::Instance(D14, 
 
 /* Retrieve the composing elements of the expansion board */
 static MotionSensor *accelerometer = mems_expansion_board->GetAccelerometer();
-
-typedef struct  {
-  int32_t x;
-  int32_t y;
-  int32_t z;
-} Data;
 
 Ticker ticker;
 Mail<Data, MAX_ITEMS> dataMailBox;
@@ -92,48 +87,36 @@ void initSensors() {
   printf("LSM6DS0 Accelerometer             = 0x%X\r\n", id);
 }
 
-void sampleData(void const*) {
-  while (true) {
+void sampleData() {
     int32_t axes[3];
     accelerometer->Get_X_Axes(axes);
     Data* accelData = dataMailBox.alloc();
-    if (accelData == NULL) {
+    if (dataMailBox.alloc() == NULL) {
       osSignalSet(mainThreadId, 0x1);
-      averages.x /= 10;
-      averages.y /= 10;
-      averages.z /= 10;
+      averages = averages / 10;
     }
 
-    accelData->x = axes[0];
-    accelData->y = axes[1];
-    accelData->z = axes[2];
-
-    averages.x += accelData->x;
-    averages.y += accelData->y;
-    averages.z += accelData->z;
+    accelData = new Data(axes[0], axes[1], axes[2]);
+    averages = averages + *accelData;
 
     osStatus status = dataMailBox.put(accelData);
 
     if (status == osErrorResource) {
       printf("Resource not available (%4Xh)", status);
     }
-    Thread::wait(100);
-  }
 }
 
 /* Simple main function */
 int main() {
   mainThreadId = osThreadGetId();
   initSensors();
-  Thread thread(sampleData);
+  ticker.attach(&sampleData, 0.1);
 
   while(1) {
     osSignalWait(0x1, osWaitForever);
-    printf("Averages: \tx: %ld\t y: %ld\t z: %ld\r\n", averages.x, averages.y, averages.z);
+    printf("Averages: \tx: %ld\t y: %ld\t z: %ld\r\n", averages.x(), averages.y(), averages.z());
     dataMailBox = Mail<Data, MAX_ITEMS>();
-    averages.x = 0;
-    averages.y = 0;
-    averages.z = 0;
+    averages = {0, 0, 0};
     sleep();
   }
 }
